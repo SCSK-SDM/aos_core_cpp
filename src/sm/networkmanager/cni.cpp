@@ -161,6 +161,17 @@ void ParseBandwidthConfig(const aos::common::utils::CaseInsensitiveObjectWrapper
     bandwidth.mEgressBurst  = plugin.GetOptionalValue<uint64_t>("egressBurst").value_or(0);
 }
 
+void ParsePortmapConfig(const aos::common::utils::CaseInsensitiveObjectWrapper& plugin, PortmapPluginConf& portmap)
+{
+    portmap.mType = plugin.GetValue<std::string>("type").c_str();
+    portmap.mSNAT = plugin.GetOptionalValue<bool>("snat").value_or(false);
+
+    if (plugin.Has("capabilities")) {
+        portmap.mCapabilityPortMappings
+            = plugin.GetObject("capabilities").GetOptionalValue<bool>("portMappings").value_or(false);
+    }
+}
+
 } // namespace
 
 /***********************************************************************************************************************
@@ -311,6 +322,8 @@ Error CNI::GetNetworkListCachedConfig(NetworkConfigList& net, RuntimeConf& rt)
                 ParseFirewallConfig(plugin, net.mFirewall);
             } else if (pluginType == "bandwidth") {
                 ParseBandwidthConfig(plugin, net.mBandwidth);
+            } else if (pluginType == "portmap") {
+                ParsePortmapConfig(plugin, net.mPortmap);
             }
         }
 
@@ -333,6 +346,25 @@ Error CNI::GetNetworkListCachedConfig(NetworkConfigList& net, RuntimeConf& rt)
                 Copy(aos::common::utils::GetArrayValue<std::string>(
                          capabilityArgs.GetObject("aliases"), net.mName.CStr()),
                     rt.mCapabilityArgs.mHost);
+            }
+
+            if (capabilityArgs.Has("portMappings")) {
+                const auto mappings = aos::common::utils::GetArrayValue<PortMapEntry>(
+                    capabilityArgs, "portMappings", [](const auto& value) {
+                        aos::common::utils::CaseInsensitiveObjectWrapper mappingObj(
+                            value.template extract<Poco::JSON::Object::Ptr>());
+
+                        PortMapEntry entry;
+
+                        entry.mHostPort      = mappingObj.GetValue<uint16_t>("hostPort");
+                        entry.mContainerPort = mappingObj.GetValue<uint16_t>("containerPort");
+                        entry.mProtocol = mappingObj.GetOptionalValue<std::string>("protocol").value_or("tcp").c_str();
+                        entry.mHostIP   = mappingObj.GetOptionalValue<std::string>("hostIP").value_or("").c_str();
+
+                        return entry;
+                    });
+
+                Copy(mappings, rt.mCapabilityArgs.mPortMappings);
             }
         }
 
@@ -1005,6 +1037,27 @@ Poco::JSON::Object CNI::CreateCapabilityArgsObject(const RuntimeConf& rt, const 
             aliases.set(networkName, aliasesArray);
             capabilityArgs.set("aliases", aliases);
         }
+    }
+
+    // The portmap plugin needs the mappings on delete as well, so they must survive in the cache.
+    if (!rt.mCapabilityArgs.mPortMappings.IsEmpty()) {
+        Poco::JSON::Array portMappingsArray;
+
+        for (const auto& mapping : rt.mCapabilityArgs.mPortMappings) {
+            Poco::JSON::Object mappingObj;
+
+            mappingObj.set("hostPort", mapping.mHostPort);
+            mappingObj.set("containerPort", mapping.mContainerPort);
+            mappingObj.set("protocol", mapping.mProtocol.CStr());
+
+            if (!mapping.mHostIP.IsEmpty()) {
+                mappingObj.set("hostIP", mapping.mHostIP.CStr());
+            }
+
+            portMappingsArray.add(mappingObj);
+        }
+
+        capabilityArgs.set("portMappings", portMappingsArray);
     }
 
     return capabilityArgs;
