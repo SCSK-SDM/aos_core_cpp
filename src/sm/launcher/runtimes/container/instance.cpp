@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <numeric>
+#include <string>
+#include <vector>
 
 #include <core/common/tools/logger.hpp>
 
@@ -24,6 +28,99 @@ namespace {
  **********************************************************************************************************************/
 
 static const char* const cBindEtcEntries[] = {"nsswitch.conf", "ssl"};
+
+/**
+ * Environment variable carrying the published ports of the instance.
+ *
+ * The cloud service config has no field for host port publishing, so the value is passed
+ * through the OCI image environment (set from config.yaml "env").
+ */
+constexpr auto cPublishedPortsEnvVar = "AOS_PUBLISHED_PORTS";
+
+/**
+ * Parses a single published port entry.
+ *
+ * Accepted forms (protocol defaults to tcp, host port defaults to the container port):
+ *   <port>
+ *   <port>/<proto>
+ *   <hostPort>:<containerPort>[/<proto>]
+ *   <hostIP>:<hostPort>:<containerPort>[/<proto>]
+ */
+bool ParsePublishedPortEntry(const std::string& entry, PublishedPort& port)
+{
+    auto value = entry;
+    auto proto = std::string("tcp");
+
+    if (auto slash = value.find('/'); slash != std::string::npos) {
+        proto = value.substr(slash + 1);
+        value = value.substr(0, slash);
+    }
+
+    if (proto != "tcp" && proto != "udp") {
+        return false;
+    }
+
+    std::vector<std::string> parts;
+    size_t                   start = 0;
+
+    for (auto pos = value.find(':'); pos != std::string::npos; pos = value.find(':', start)) {
+        parts.push_back(value.substr(start, pos - start));
+        start = pos + 1;
+    }
+
+    parts.push_back(value.substr(start));
+
+    std::string hostIP, hostPortStr, containerPortStr;
+
+    switch (parts.size()) {
+    case 1:
+        hostPortStr = containerPortStr = parts[0];
+        break;
+
+    case 2:
+        hostPortStr      = parts[0];
+        containerPortStr = parts[1];
+        break;
+
+    case 3:
+        hostIP           = parts[0];
+        hostPortStr      = parts[1];
+        containerPortStr = parts[2];
+        break;
+
+    default:
+        return false;
+    }
+
+    auto toPort = [](const std::string& str, uint16_t& result) {
+        if (str.empty() || str.find_first_not_of("0123456789") != std::string::npos) {
+            return false;
+        }
+
+        const auto parsed = std::strtoul(str.c_str(), nullptr, 10);
+        if (parsed == 0 || parsed > std::numeric_limits<uint16_t>::max()) {
+            return false;
+        }
+
+        result = static_cast<uint16_t>(parsed);
+
+        return true;
+    };
+
+    if (!toPort(hostPortStr, port.mHostPort) || !toPort(containerPortStr, port.mContainerPort)) {
+        return false;
+    }
+
+    if (!port.mProtocol.Assign(proto.c_str()).IsNone()) {
+        return false;
+    }
+
+    if (!hostIP.empty() && !port.mHostIP.Assign(hostIP.c_str()).IsNone()) {
+        return false;
+    }
+
+    return true;
+}
 
 } // namespace
 
@@ -114,7 +211,7 @@ Error Instance::Start()
     }
 
     if (mInstanceInfo.mNetworkParameters.HasValue()) {
-        if (err = SetupNetwork(runtimeDir, *itemConfig); !err.IsNone()) {
+        if (err = SetupNetwork(runtimeDir, *imageConfig, *itemConfig); !err.IsNone()) {
             return err;
         }
     }
@@ -721,7 +818,56 @@ Error Instance::PrepareRootFS(
     return ErrorEnum::eNone;
 }
 
-Error Instance::SetupNetwork(const std::string& runtimeDir, const oci::ItemConfig& itemConfig)
+Error Instance::ParsePublishedPorts(const oci::ImageConfig& imageConfig, Array<PublishedPort>& publishedPorts) const
+{
+    const std::string prefix = std::string(cPublishedPortsEnvVar) + "=";
+
+    for (const auto& env : imageConfig.mConfig.mEnv) {
+        const std::string envStr = env.CStr();
+
+        if (envStr.rfind(prefix, 0) != 0) {
+            continue;
+        }
+
+        const auto value = envStr.substr(prefix.size());
+        size_t     start = 0;
+
+        while (start <= value.size()) {
+            const auto comma = value.find(',', start);
+            const auto entry = value.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+
+            if (!entry.empty()) {
+                PublishedPort port;
+
+                if (!ParsePublishedPortEntry(entry, port)) {
+                    // The value comes from the service author, so a single malformed entry must not
+                    // prevent the instance from starting: skip it and keep the rest.
+                    LOG_WRN() << "Skip invalid published port entry" << Log::Field("entry", entry.c_str())
+                              << Log::Field(mInstanceID.c_str());
+
+                } else if (auto err = publishedPorts.PushBack(port); !err.IsNone()) {
+                    LOG_WRN() << "Too many published ports, entry skipped" << Log::Field("entry", entry.c_str())
+                              << Log::Field(mInstanceID.c_str());
+                } else {
+                    LOG_DBG() << "Publish port" << Log::Field("hostPort", port.mHostPort)
+                              << Log::Field("containerPort", port.mContainerPort)
+                              << Log::Field("protocol", port.mProtocol);
+                }
+            }
+
+            if (comma == std::string::npos) {
+                break;
+            }
+
+            start = comma + 1;
+        }
+    }
+
+    return ErrorEnum::eNone;
+}
+
+Error Instance::SetupNetwork(
+    const std::string& runtimeDir, const oci::ImageConfig& imageConfig, const oci::ItemConfig& itemConfig)
 {
     LOG_DBG() << "Setup network" << Log::Field("instanceID", mInstanceID.c_str());
 
@@ -775,6 +921,10 @@ Error Instance::SetupNetwork(const std::string& runtimeDir, const oci::ItemConfi
 
     if (itemConfig.mQuotas.mUploadLimit.HasValue()) {
         networkParams->mUploadLimit = *itemConfig.mQuotas.mUploadLimit;
+    }
+
+    if (auto err = ParsePublishedPorts(imageConfig, networkParams->mPublishedPorts); !err.IsNone()) {
+        return AOS_ERROR_WRAP(err);
     }
 
     if (auto err = mFileSystem.PrepareNetworkDir(common::utils::JoinPath(runtimeDir, cMountPointsDir)); !err.IsNone()) {

@@ -102,6 +102,8 @@ private:
         const std::string& args, std::vector<std::string>& plugins);
     std::string ExecuteDNSPlugin(const NetworkConfigList& net, const RuntimeConf& rt, const std::string& prevResult,
         const std::string& args, std::vector<std::string>& plugins);
+    std::string ExecutePortmapPlugin(const NetworkConfigList& net, const RuntimeConf& rt,
+        const std::string& prevResult, const std::string& args, std::vector<std::string>& plugins);
     std::string ArgsAsString(const RuntimeConf& rt, Action action) const;
 
     std::string CreateBridgePluginConfig(const BridgePluginConf& bridge) const;
@@ -115,6 +117,11 @@ private:
         std::vector<std::string>& plugins);
     std::string AddDNSRuntimeConfig(
         const std::string& pluginConfig, const std::string& name, const RuntimeConf& rt) const;
+
+    std::string CreatePortmapPluginConfig(const PortmapPluginConf& portmap) const;
+    std::string PortmapConfigToJSON(const NetworkConfigList& net, const RuntimeConf& rt, const std::string& prevResult,
+        std::vector<std::string>& plugins);
+    std::string AddPortmapRuntimeConfig(const std::string& pluginConfig, const RuntimeConf& rt) const;
 
     std::string AddCNIData(const std::string& pluginConfig, const std::string& version, const std::string& name,
         const std::string& prevResult) const;

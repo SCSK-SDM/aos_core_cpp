@@ -201,6 +201,8 @@ Error CNI::AddNetworkList(const NetworkConfigList& net, const RuntimeConf& rt, R
         prevResult = ExecuteDNSPlugin(net, rt, prevResult, args, plugins);
         prevResult = ExecuteFirewallPlugin(net, prevResult, args, plugins);
         prevResult = ExecuteBandwidthPlugin(net, prevResult, args, plugins);
+        // Portmap runs last: it needs the instance IP resolved by the bridge plugin.
+        prevResult = ExecutePortmapPlugin(net, rt, prevResult, args, plugins);
 
         ParsePrevResult(prevResult, result);
         auto path = std::filesystem::path(mConfigDir) / (net.mName.CStr() + std::string("-") + rt.mContainerID.CStr());
@@ -227,6 +229,8 @@ Error CNI::DeleteNetworkList(const NetworkConfigList& net, const RuntimeConf& rt
         ExecuteDNSPlugin(net, rt, prevResult, args, plugins);
         ExecuteFirewallPlugin(net, prevResult, args, plugins);
         ExecuteBandwidthPlugin(net, prevResult, args, plugins);
+        // Must mirror AddNetworkList, otherwise DNAT rules would be left behind.
+        ExecutePortmapPlugin(net, rt, prevResult, args, plugins);
 
         if (!std::filesystem::remove(
                 std::filesystem::path(mConfigDir) / (net.mName.CStr() + std::string("-") + rt.mContainerID.CStr()))) {
@@ -496,6 +500,24 @@ std::string CNI::ExecuteFirewallPlugin(const NetworkConfigList& net, const std::
     return result;
 }
 
+std::string CNI::ExecutePortmapPlugin(const NetworkConfigList& net, const RuntimeConf& rt,
+    const std::string& prevResult, const std::string& args, std::vector<std::string>& plugins)
+{
+    if (net.mPortmap.mType.IsEmpty()) {
+        return prevResult;
+    }
+
+    LOG_DBG() << "Execute portmap plugin: name=" << net.mName.CStr();
+
+    auto portmapConfig = PortmapConfigToJSON(net, rt, prevResult, plugins);
+    auto pluginPath    = std::filesystem::path(cBinaryPluginDir) / net.mPortmap.mType.CStr();
+
+    auto [result, err] = mExec->ExecPlugin(portmapConfig, pluginPath, args);
+    AOS_ERROR_CHECK_AND_THROW(err, "failed to execute portmap plugin");
+
+    return result;
+}
+
 std::string CNI::CreateBridgePluginConfig(const BridgePluginConf& bridge) const
 {
     Poco::JSON::Object jsonRoot;
@@ -711,6 +733,75 @@ std::string CNI::CreateDNSPluginConfig(const DNSPluginConf& dns) const
     jsonRoot.stringify(oss);
 
     return oss.str();
+}
+
+std::string CNI::CreatePortmapPluginConfig(const PortmapPluginConf& portmap) const
+{
+    Poco::JSON::Object jsonRoot;
+
+    jsonRoot.set("type", portmap.mType.CStr());
+    jsonRoot.set("snat", portmap.mSNAT);
+
+    Poco::JSON::Object capabilitiesObj;
+
+    capabilitiesObj.set("portMappings", portmap.mCapabilityPortMappings);
+    jsonRoot.set("capabilities", capabilitiesObj);
+
+    std::ostringstream oss;
+
+    jsonRoot.stringify(oss);
+
+    return oss.str();
+}
+
+std::string CNI::AddPortmapRuntimeConfig(const std::string& pluginConfig, const RuntimeConf& rt) const
+{
+    if (rt.mCapabilityArgs.mPortMappings.IsEmpty()) {
+        return pluginConfig;
+    }
+
+    auto [json, err] = common::utils::ParseJson(pluginConfig);
+    AOS_ERROR_CHECK_AND_THROW(err, "failed to parse plugin config");
+
+    auto jsonRoot = json.extract<Poco::JSON::Object::Ptr>();
+
+    Poco::JSON::Object runtimeConfig;
+    Poco::JSON::Array  portMappingsArray;
+
+    for (const auto& mapping : rt.mCapabilityArgs.mPortMappings) {
+        Poco::JSON::Object mappingObj;
+
+        mappingObj.set("hostPort", mapping.mHostPort);
+        mappingObj.set("containerPort", mapping.mContainerPort);
+        mappingObj.set("protocol", mapping.mProtocol.CStr());
+
+        if (!mapping.mHostIP.IsEmpty()) {
+            mappingObj.set("hostIP", mapping.mHostIP.CStr());
+        }
+
+        portMappingsArray.add(mappingObj);
+    }
+
+    runtimeConfig.set("portMappings", portMappingsArray);
+    jsonRoot->set("runtimeConfig", runtimeConfig);
+
+    std::ostringstream oss;
+
+    jsonRoot->stringify(oss);
+
+    return oss.str();
+}
+
+std::string CNI::PortmapConfigToJSON(const NetworkConfigList& net, const RuntimeConf& rt,
+    const std::string& prevResult, std::vector<std::string>& plugins)
+{
+    auto pluginConfig = CreatePortmapPluginConfig(net.mPortmap);
+
+    plugins.push_back(pluginConfig);
+
+    auto configWithRuntime = AddPortmapRuntimeConfig(pluginConfig, rt);
+
+    return AddCNIData(configWithRuntime, net.mVersion.CStr(), net.mName.CStr(), prevResult);
 }
 
 std::string CNI::AddDNSRuntimeConfig(
