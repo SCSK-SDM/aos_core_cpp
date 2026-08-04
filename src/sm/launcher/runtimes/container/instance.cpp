@@ -843,11 +843,11 @@ Error Instance::ParsePublishedPorts(const oci::ImageConfig& imageConfig, Array<P
                     // The value comes from the service author, so a single malformed entry must not
                     // prevent the instance from starting: skip it and keep the rest.
                     LOG_WRN() << "Skip invalid published port entry" << Log::Field("entry", entry.c_str())
-                              << Log::Field(mInstanceID.c_str());
+                              << Log::Field("instanceID", mInstanceID.c_str());
 
                 } else if (auto err = publishedPorts.PushBack(port); !err.IsNone()) {
                     LOG_WRN() << "Too many published ports, entry skipped" << Log::Field("entry", entry.c_str())
-                              << Log::Field(mInstanceID.c_str());
+                              << Log::Field("instanceID", mInstanceID.c_str());
                 } else {
                     LOG_DBG() << "Publish port" << Log::Field("hostPort", port.mHostPort)
                               << Log::Field("containerPort", port.mContainerPort)
