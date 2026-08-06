@@ -8,7 +8,13 @@ from conan.tools.gnu import PkgConfigDeps
 class PKCS11Provider(ConanFile):
     name = "pkcs11provider"
     branch = "main"
-    revision = "v1.0"
+    # The v1.0 tag prompts for a PIN interactively instead of honouring the
+    # pin-source parameter of a PKCS#11 URI, so TLS handshakes fail in daemons:
+    #   Enter PIN for PKCS#11 Token (Slot ...):
+    #   Handshake failed with fatal error SSL_ERROR_SSL: UI routines::processing error
+    # Use the same revision meta-aos ships (recipes-connectivity/pkcs11-provider_1.0.bb),
+    # which is a later commit on main and reads the PIN from pin-source.
+    revision = "8f6b94409d4872265076df310492da1e5f6abdf7"
     version = "1.0"
     settings = "os", "compiler", "build_type", "arch"
 
