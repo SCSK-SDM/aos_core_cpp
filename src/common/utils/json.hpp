@@ -8,6 +8,7 @@
 #ifndef AOS_COMMON_UTILS_JSON_HPP_
 #define AOS_COMMON_UTILS_JSON_HPP_
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <unordered_map>

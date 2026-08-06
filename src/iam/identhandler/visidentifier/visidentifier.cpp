@@ -6,6 +6,7 @@
  */
 
 #include <Poco/JSON/JSONException.h>
+#include <algorithm>
 
 #include <core/common/tools/logger.hpp>
 

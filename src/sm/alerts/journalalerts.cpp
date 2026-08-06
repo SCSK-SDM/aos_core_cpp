@@ -6,6 +6,7 @@
 
 #include <Poco/Format.h>
 #include <Poco/RegularExpression.h>
+#include <algorithm>
 
 #include <core/common/tools/logger.hpp>
 

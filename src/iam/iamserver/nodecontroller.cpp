@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <algorithm>
 #include <thread>
 
 #include <core/common/tools/logger.hpp>
