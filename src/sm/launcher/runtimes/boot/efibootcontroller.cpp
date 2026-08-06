@@ -68,7 +68,7 @@ RetWithError<size_t> EFIBootController::GetCurrentBoot() const
 
     LOG_DBG() << "Get EFI current boot" << Log::Field("bootID", efiCurrentBoot);
 
-    // 構造化束縛はラムダで捕捉できない（C++17）。通常の変数へ写す
+    // Structured bindings cannot be captured in a lambda in C++17; copy to a plain variable.
     const auto currentBoot = efiCurrentBoot;
 
     auto itBootItem = std::find_if(mBootItems.begin(), mBootItems.end(),
