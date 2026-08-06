@@ -199,7 +199,7 @@ Error CNI::SetConfDir(const String& configDir)
 
 Error CNI::AddNetworkList(const NetworkConfigList& net, const RuntimeConf& rt, Result& result)
 {
-    std::lock_guard {mMutex};
+    std::lock_guard lock {mMutex};
 
     LOG_DBG() << "Add network list: name=" << net.mName.CStr();
 

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <zlib.h>
+
 #include <Poco/Zip/Compress.h>
 
 #include <core/common/tools/logger.hpp>
