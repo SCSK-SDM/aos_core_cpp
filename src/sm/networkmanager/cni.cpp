@@ -162,6 +162,13 @@ void ParseBandwidthConfig(const aos::common::utils::CaseInsensitiveObjectWrapper
     bandwidth.mEgressBurst  = plugin.GetOptionalValue<uint64_t>("egressBurst").value_or(0);
 }
 
+void ParseHostDeviceConfig(
+    const aos::common::utils::CaseInsensitiveObjectWrapper& plugin, HostDevicePluginConf& hostDevice)
+{
+    hostDevice.mType   = plugin.GetValue<std::string>("type").c_str();
+    hostDevice.mDevice = plugin.GetValue<std::string>("device").c_str();
+}
+
 void ParsePortmapConfig(const aos::common::utils::CaseInsensitiveObjectWrapper& plugin, PortmapPluginConf& portmap)
 {
     portmap.mType = plugin.GetValue<std::string>("type").c_str();
@@ -328,6 +335,8 @@ Error CNI::GetNetworkListCachedConfig(NetworkConfigList& net, RuntimeConf& rt)
                 ParseBandwidthConfig(plugin, net.mBandwidth);
             } else if (pluginType == "portmap") {
                 ParsePortmapConfig(plugin, net.mPortmap);
+            } else if (pluginType == "host-device") {
+                ParseHostDeviceConfig(plugin, net.mHostDevice);
             }
         }
 
@@ -536,26 +545,28 @@ std::string CNI::ExecuteFirewallPlugin(const NetworkConfigList& net, const std::
     return result;
 }
 
+std::string CNI::CreateHostDevicePluginConfig(const HostDevicePluginConf& hostDevice) const
+{
+    Poco::JSON::Object jsonRoot;
+
+    jsonRoot.set("type", hostDevice.mType.CStr());
+    jsonRoot.set("device", hostDevice.mDevice.CStr());
+
+    std::ostringstream oss;
+
+    jsonRoot.stringify(oss);
+
+    return oss.str();
+}
+
 std::string CNI::HostDeviceConfigToJSON(
     const NetworkConfigList& net, const std::string& prevResult, std::vector<std::string>& plugins)
 {
-    Poco::JSON::Object config;
+    auto pluginConfig = CreateHostDevicePluginConfig(net.mHostDevice);
 
-    config.set("cniVersion", net.mVersion.CStr());
-    config.set("name", net.mName.CStr());
-    config.set("type", net.mHostDevice.mType.CStr());
-    config.set("device", net.mHostDevice.mDevice.CStr());
+    plugins.push_back(pluginConfig);
 
-    if (!prevResult.empty()) {
-        config.set("prevResult", common::utils::ParseJson(prevResult).mValue);
-    }
-
-    plugins.push_back(net.mHostDevice.mType.CStr());
-
-    std::ostringstream oss;
-    config.stringify(oss);
-
-    return oss.str();
+    return AddCNIData(pluginConfig, net.mVersion.CStr(), net.mName.CStr(), prevResult);
 }
 
 std::string CNI::ExecuteHostDevicePlugin(const NetworkConfigList& net, const RuntimeConf& rt,

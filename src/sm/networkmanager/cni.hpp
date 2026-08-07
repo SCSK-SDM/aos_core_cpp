@@ -106,6 +106,7 @@ private:
         const std::string& prevResult, const std::string& args, std::vector<std::string>& plugins);
     std::string ExecuteHostDevicePlugin(const NetworkConfigList& net, const RuntimeConf& rt,
         const std::string& prevResult, Action action, std::vector<std::string>& plugins);
+    std::string CreateHostDevicePluginConfig(const HostDevicePluginConf& hostDevice) const;
     std::string HostDeviceConfigToJSON(
         const NetworkConfigList& net, const std::string& prevResult, std::vector<std::string>& plugins);
     // ifNameOverride: name the plugin should give the interface inside the container.
