@@ -215,7 +215,7 @@ Error CNI::AddNetworkList(const NetworkConfigList& net, const RuntimeConf& rt, R
         prevResult = ExecuteBandwidthPlugin(net, prevResult, args, plugins);
         // Portmap runs last: it needs the instance IP resolved by the bridge plugin.
         prevResult = ExecutePortmapPlugin(net, rt, prevResult, args, plugins);
-        prevResult = ExecuteHostDevicePlugin(net, prevResult, args, plugins);
+        prevResult = ExecuteHostDevicePlugin(net, rt, prevResult, ActionEnum::eAdd, plugins);
 
         ParsePrevResult(prevResult, result);
         auto path = std::filesystem::path(mConfigDir) / (net.mName.CStr() + std::string("-") + rt.mContainerID.CStr());
@@ -245,7 +245,7 @@ Error CNI::DeleteNetworkList(const NetworkConfigList& net, const RuntimeConf& rt
         // Must mirror AddNetworkList, otherwise DNAT rules would be left behind.
         ExecutePortmapPlugin(net, rt, prevResult, args, plugins);
         // Returns the host interface to the initial namespace.
-        ExecuteHostDevicePlugin(net, prevResult, args, plugins);
+        ExecuteHostDevicePlugin(net, rt, prevResult, ActionEnum::eDel, plugins);
 
         if (!std::filesystem::remove(
                 std::filesystem::path(mConfigDir) / (net.mName.CStr() + std::string("-") + rt.mContainerID.CStr()))) {
@@ -558,8 +558,8 @@ std::string CNI::HostDeviceConfigToJSON(
     return oss.str();
 }
 
-std::string CNI::ExecuteHostDevicePlugin(const NetworkConfigList& net, const std::string& prevResult,
-    const std::string& args, std::vector<std::string>& plugins)
+std::string CNI::ExecuteHostDevicePlugin(const NetworkConfigList& net, const RuntimeConf& rt,
+    const std::string& prevResult, Action action, std::vector<std::string>& plugins)
 {
     if (net.mHostDevice.mType.IsEmpty() || net.mHostDevice.mDevice.IsEmpty()) {
         return prevResult;
@@ -567,6 +567,11 @@ std::string CNI::ExecuteHostDevicePlugin(const NetworkConfigList& net, const std
 
     LOG_DBG() << "Execute host device plugin: name=" << net.mName.CStr()
               << ", device=" << net.mHostDevice.mDevice.CStr();
+
+    // The plugin renames the interface to CNI_IFNAME. The shared args carry the instance
+    // interface name ("eth0"), which the bridge plugin has already taken, so keep the host
+    // name instead: the instance sees the same "can0" the device profile declares.
+    auto args = ArgsAsString(rt, action, net.mHostDevice.mDevice.CStr());
 
     auto hostDeviceConfig = HostDeviceConfigToJSON(net, prevResult, plugins);
     auto pluginPath       = std::filesystem::path(cBinaryPluginDir) / net.mHostDevice.mType.CStr();
@@ -952,7 +957,7 @@ std::string CNI::DNSConfigToJSON(const NetworkConfigList& net, const RuntimeConf
     return AddCNIData(configWithRuntime, net.mVersion.CStr(), net.mName.CStr(), prevResult);
 }
 
-std::string CNI::ArgsAsString(const RuntimeConf& rt, Action action) const
+std::string CNI::ArgsAsString(const RuntimeConf& rt, Action action, const std::string& ifNameOverride) const
 {
     LOG_DBG() << "Create args string: action=" << action;
 
@@ -975,8 +980,10 @@ std::string CNI::ArgsAsString(const RuntimeConf& rt, Action action) const
         envs.push_back("CNI_NETNS=" + std::string(rt.mNetNS.CStr()));
     }
 
-    if (!rt.mIfName.IsEmpty()) {
-        envs.push_back("CNI_IFNAME=" + std::string(rt.mIfName.CStr()));
+    auto ifName = ifNameOverride.empty() ? std::string(rt.mIfName.CStr()) : ifNameOverride;
+
+    if (!ifName.empty()) {
+        envs.push_back("CNI_IFNAME=" + ifName);
     }
 
     return std::accumulate(envs.begin(), envs.end(), std::string {},
