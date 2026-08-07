@@ -104,6 +104,10 @@ private:
         const std::string& args, std::vector<std::string>& plugins);
     std::string ExecutePortmapPlugin(const NetworkConfigList& net, const RuntimeConf& rt,
         const std::string& prevResult, const std::string& args, std::vector<std::string>& plugins);
+    std::string ExecuteHostDevicePlugin(const NetworkConfigList& net, const std::string& prevResult,
+        const std::string& args, std::vector<std::string>& plugins);
+    std::string HostDeviceConfigToJSON(
+        const NetworkConfigList& net, const std::string& prevResult, std::vector<std::string>& plugins);
     std::string ArgsAsString(const RuntimeConf& rt, Action action) const;
 
     std::string CreateBridgePluginConfig(const BridgePluginConf& bridge) const;

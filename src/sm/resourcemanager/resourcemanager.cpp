@@ -82,6 +82,13 @@ void ParseResourceInfo(const common::utils::CaseInsensitiveObjectWrapper& object
         auto err = resource.mDevices.EmplaceBack(var.convert<std::string>().c_str());
         AOS_ERROR_CHECK_AND_THROW(err, "can't parse host device name");
     });
+
+    // Network interfaces without a /dev node (e.g. SocketCAN "can0"). They are handed
+    // to the instance by moving them into its network namespace, not via linux.devices.
+    common::utils::ForEach(object, "networkDevices", [&](const Poco::Dynamic::Var& var) {
+        auto err = resource.mNetworkDevices.EmplaceBack(var.convert<std::string>().c_str());
+        AOS_ERROR_CHECK_AND_THROW(err, "can't parse host network device name");
+    });
 }
 
 } // namespace
@@ -105,7 +112,9 @@ Error ResourceManager::GetResourcesInfos(Array<aos::ResourceInfo>& resources)
 
     for (const auto& resource : mResources) {
         LOG_DBG() << "Resource info" << Log::Field("name", resource.mName)
-                  << Log::Field("sharedCount", resource.mSharedCount);
+                  << Log::Field("sharedCount", resource.mSharedCount)
+                  << Log::Field("devices", resource.mDevices.Size())
+                  << Log::Field("networkDevices", resource.mNetworkDevices.Size());
 
         if (auto err = resources.PushBack(resource); !err.IsNone()) {
             return AOS_ERROR_WRAP(err);

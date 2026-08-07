@@ -215,6 +215,7 @@ Error CNI::AddNetworkList(const NetworkConfigList& net, const RuntimeConf& rt, R
         prevResult = ExecuteBandwidthPlugin(net, prevResult, args, plugins);
         // Portmap runs last: it needs the instance IP resolved by the bridge plugin.
         prevResult = ExecutePortmapPlugin(net, rt, prevResult, args, plugins);
+        prevResult = ExecuteHostDevicePlugin(net, prevResult, args, plugins);
 
         ParsePrevResult(prevResult, result);
         auto path = std::filesystem::path(mConfigDir) / (net.mName.CStr() + std::string("-") + rt.mContainerID.CStr());
@@ -243,6 +244,8 @@ Error CNI::DeleteNetworkList(const NetworkConfigList& net, const RuntimeConf& rt
         ExecuteBandwidthPlugin(net, prevResult, args, plugins);
         // Must mirror AddNetworkList, otherwise DNAT rules would be left behind.
         ExecutePortmapPlugin(net, rt, prevResult, args, plugins);
+        // Returns the host interface to the initial namespace.
+        ExecuteHostDevicePlugin(net, prevResult, args, plugins);
 
         if (!std::filesystem::remove(
                 std::filesystem::path(mConfigDir) / (net.mName.CStr() + std::string("-") + rt.mContainerID.CStr()))) {
@@ -529,6 +532,47 @@ std::string CNI::ExecuteFirewallPlugin(const NetworkConfigList& net, const std::
 
     auto [result, err] = mExec->ExecPlugin(firewallConfig, pluginPath, args);
     AOS_ERROR_CHECK_AND_THROW(err, "failed to execute firewall plugin");
+
+    return result;
+}
+
+std::string CNI::HostDeviceConfigToJSON(
+    const NetworkConfigList& net, const std::string& prevResult, std::vector<std::string>& plugins)
+{
+    Poco::JSON::Object config;
+
+    config.set("cniVersion", net.mVersion.CStr());
+    config.set("name", net.mName.CStr());
+    config.set("type", net.mHostDevice.mType.CStr());
+    config.set("device", net.mHostDevice.mDevice.CStr());
+
+    if (!prevResult.empty()) {
+        config.set("prevResult", common::utils::ParseJson(prevResult).mValue);
+    }
+
+    plugins.push_back(net.mHostDevice.mType.CStr());
+
+    std::ostringstream oss;
+    config.stringify(oss);
+
+    return oss.str();
+}
+
+std::string CNI::ExecuteHostDevicePlugin(const NetworkConfigList& net, const std::string& prevResult,
+    const std::string& args, std::vector<std::string>& plugins)
+{
+    if (net.mHostDevice.mType.IsEmpty() || net.mHostDevice.mDevice.IsEmpty()) {
+        return prevResult;
+    }
+
+    LOG_DBG() << "Execute host device plugin: name=" << net.mName.CStr()
+              << ", device=" << net.mHostDevice.mDevice.CStr();
+
+    auto hostDeviceConfig = HostDeviceConfigToJSON(net, prevResult, plugins);
+    auto pluginPath       = std::filesystem::path(cBinaryPluginDir) / net.mHostDevice.mType.CStr();
+
+    auto [result, err] = mExec->ExecPlugin(hostDeviceConfig, pluginPath, args);
+    AOS_ERROR_CHECK_AND_THROW(err, "failed to execute host device plugin");
 
     return result;
 }
