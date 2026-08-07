@@ -169,6 +169,8 @@ private:
     Error ParsePublishedPorts(const oci::ImageConfig& imageConfig,
         Array<PublishedPort>& publishedPorts) const;
     Error AddNetworkHostsFromResource(const std::string& resource, std::vector<Host>& hosts);
+    Error AddNetworkDevicesFromResource(
+        const std::string& resource, Array<StaticString<cInterfaceLen>>& networkDevices);
     Error StartMonitoring();
 
     InstanceInfo mInstanceInfo;

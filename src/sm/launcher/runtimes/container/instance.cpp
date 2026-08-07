@@ -893,6 +893,11 @@ Error Instance::SetupNetwork(
         if (auto err = AddNetworkHostsFromResource(resource.mName.CStr(), hosts); !err.IsNone()) {
             return AOS_ERROR_WRAP(err);
         }
+
+        if (auto err = AddNetworkDevicesFromResource(resource.mName.CStr(), networkParams->mNetworkDevices);
+            !err.IsNone()) {
+            return AOS_ERROR_WRAP(err);
+        }
     }
 
     for (const auto& host : hosts) {
@@ -948,6 +953,24 @@ Error Instance::AddNetworkHostsFromResource(const std::string& resource, std::ve
     }
 
     hosts.insert(hosts.end(), resourceInfo->mHosts.begin(), resourceInfo->mHosts.end());
+
+    return ErrorEnum::eNone;
+}
+
+Error Instance::AddNetworkDevicesFromResource(
+    const std::string& resource, Array<StaticString<cInterfaceLen>>& networkDevices)
+{
+    auto resourceInfo = std::make_unique<resourcemanager::ResourceInfo>();
+
+    if (auto err = mResourceInfoProvider.GetResourceInfo(resource.c_str(), *resourceInfo); !err.IsNone()) {
+        return AOS_ERROR_WRAP(err);
+    }
+
+    for (const auto& device : resourceInfo->mNetworkDevices) {
+        if (auto err = networkDevices.PushBack(device); !err.IsNone()) {
+            return AOS_ERROR_WRAP(err);
+        }
+    }
 
     return ErrorEnum::eNone;
 }
