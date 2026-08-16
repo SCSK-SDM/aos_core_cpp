@@ -222,7 +222,15 @@ Error CNI::AddNetworkList(const NetworkConfigList& net, const RuntimeConf& rt, R
         prevResult = ExecuteBandwidthPlugin(net, prevResult, args, plugins);
         // Portmap runs last: it needs the instance IP resolved by the bridge plugin.
         prevResult = ExecutePortmapPlugin(net, rt, prevResult, args, plugins);
-        prevResult = ExecuteHostDevicePlugin(net, rt, prevResult, ActionEnum::eAdd, plugins);
+        // Run it, but keep the chain result as it was.
+        //
+        // host-device reports only the interface it moved, with no IPs, so taking its
+        // output as the chain result throws away the address the bridge assigned. That
+        // result is what gets cached, and the cache is what DEL replays as prevResult --
+        // where dnsname refuses a result with no IP ("no ip address was found in the
+        // network"), aborting the teardown before its own alias is removed. Every later
+        // start then fails with "Alias ... already exists", needing manual repair.
+        ExecuteHostDevicePlugin(net, rt, prevResult, ActionEnum::eAdd, plugins);
 
         ParsePrevResult(prevResult, result);
         auto path = std::filesystem::path(mConfigDir) / (net.mName.CStr() + std::string("-") + rt.mContainerID.CStr());
@@ -244,22 +252,46 @@ Error CNI::DeleteNetworkList(const NetworkConfigList& net, const RuntimeConf& rt
         auto args       = ArgsAsString(rt, ActionEnum::eDel);
 
         std::vector<std::string> plugins;
+        Error                    firstErr;
 
-        ExecuteBridgePlugin(net, prevResult, args, plugins);
-        ExecuteDNSPlugin(net, rt, prevResult, args, plugins);
-        ExecuteFirewallPlugin(net, prevResult, args, plugins);
-        ExecuteBandwidthPlugin(net, prevResult, args, plugins);
+        // Keep going when a plugin fails.
+        //
+        // DEL exists to release what ADD took, and the plugins release different things:
+        // giving up on the first failure abandons the rest. Losing the host-device DEL is
+        // the one that hurts -- the interface stays in the namespace and the host cannot
+        // hand it to the next instance. An iptables chain that has already gone is enough
+        // to trigger this, so the first error is reported but does not stop the teardown.
+        auto release = [&firstErr](const char* step, auto&& fn) {
+            try {
+                fn();
+            } catch (const std::exception& e) {
+                auto err = AOS_ERROR_WRAP(common::utils::ToAosError(e));
+
+                LOG_ERR() << "Failed to delete network: step=" << step << ", err=" << err;
+
+                if (firstErr.IsNone()) {
+                    firstErr = err;
+                }
+            }
+        };
+
+        release("bridge", [&] { ExecuteBridgePlugin(net, prevResult, args, plugins); });
+        release("dns", [&] { ExecuteDNSPlugin(net, rt, prevResult, args, plugins); });
+        release("firewall", [&] { ExecuteFirewallPlugin(net, prevResult, args, plugins); });
+        release("bandwidth", [&] { ExecuteBandwidthPlugin(net, prevResult, args, plugins); });
         // Must mirror AddNetworkList, otherwise DNAT rules would be left behind.
-        ExecutePortmapPlugin(net, rt, prevResult, args, plugins);
+        release("portmap", [&] { ExecutePortmapPlugin(net, rt, prevResult, args, plugins); });
         // Returns the host interface to the initial namespace.
-        ExecuteHostDevicePlugin(net, rt, prevResult, ActionEnum::eDel, plugins);
+        release("host-device", [&] { ExecuteHostDevicePlugin(net, rt, prevResult, ActionEnum::eDel, plugins); });
 
         if (!std::filesystem::remove(
                 std::filesystem::path(mConfigDir) / (net.mName.CStr() + std::string("-") + rt.mContainerID.CStr()))) {
-            return Error(ErrorEnum::eFailed, "failed to remove cache file");
+            if (firstErr.IsNone()) {
+                firstErr = Error(ErrorEnum::eFailed, "failed to remove cache file");
+            }
         }
 
-        return ErrorEnum::eNone;
+        return firstErr;
     } catch (const std::exception& e) {
         return AOS_ERROR_WRAP(common::utils::ToAosError(e));
     }
