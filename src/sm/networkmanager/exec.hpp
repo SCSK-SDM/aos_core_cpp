@@ -8,6 +8,7 @@
 #define AOS_SM_NETWORKMANAGER_EXEC_HPP_
 
 #include <string>
+#include <vector>
 
 #include <core/common/tools/error.hpp>
 
@@ -28,6 +29,20 @@ public:
     virtual RetWithError<std::string> ExecPlugin(
         const std::string& payload, const std::string& pluginPath, const std::string& args) const
         = 0;
+
+    /**
+     * Executes a command with arguments and returns its stdout.
+     *
+     * ExecPlugin() passes everything through the environment, as the CNI spec requires,
+     * so it cannot run an ordinary command. Restoring a CAN link after host-device has
+     * moved it needs "ip" with arguments.
+     *
+     * @param path Path to the executable.
+     * @param args Arguments.
+     * @return RetWithError<std::string>.
+     */
+    virtual RetWithError<std::string> ExecCommand(const std::string& path, const std::vector<std::string>& args) const
+        = 0;
 };
 
 /**
@@ -45,6 +60,16 @@ public:
      */
     RetWithError<std::string> ExecPlugin(
         const std::string& payload, const std::string& pluginPath, const std::string& args) const override;
+
+    /**
+     * Executes a command with arguments and returns its stdout.
+     *
+     * @param path Path to the executable.
+     * @param args Arguments.
+     * @return RetWithError<std::string>.
+     */
+    RetWithError<std::string> ExecCommand(
+        const std::string& path, const std::vector<std::string>& args) const override;
 };
 
 } // namespace aos::sm::cni

@@ -121,6 +121,38 @@ std::string LaunchPlugin(
  * Public
  **********************************************************************************************************************/
 
+RetWithError<std::string> Exec::ExecCommand(const std::string& path, const std::vector<std::string>& args) const
+{
+    try {
+        Poco::Pipe outPipe, errPipe;
+
+        Poco::Process::Args processArgs(args.begin(), args.end());
+        Poco::ProcessHandle ph = Poco::Process::launch(path, processArgs, nullptr, &outPipe, &errPipe);
+
+        std::string            output, error, line;
+        Poco::PipeInputStream  istr(outPipe);
+
+        while (std::getline(istr, line)) {
+            output += line + "\n";
+        }
+
+        Poco::PipeInputStream estr(errPipe);
+
+        while (std::getline(estr, line)) {
+            error += line + "\n";
+        }
+
+        if (auto exitCode = ph.wait(); exitCode != 0) {
+            throw std::runtime_error("command failed with exit code " + std::to_string(exitCode)
+                + (error.empty() ? "" : ": " + error));
+        }
+
+        return {output, ErrorEnum::eNone};
+    } catch (const std::exception& e) {
+        return {"", AOS_ERROR_WRAP(common::utils::ToAosError(e))};
+    }
+}
+
 RetWithError<std::string> Exec::ExecPlugin(
     const std::string& payload, const std::string& pluginPath, const std::string& args) const
 {

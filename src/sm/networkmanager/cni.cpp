@@ -30,6 +30,10 @@ namespace {
  * Static
  **********************************************************************************************************************/
 
+// Restoring a CAN link needs iproute2. The image ships it here, and can0-up.service uses
+// the same path.
+constexpr auto cIPCommand = "/usr/sbin/ip";
+
 template <typename InputContainer, typename OutputContainer>
 void Copy(const InputContainer& input, OutputContainer& output)
 {
@@ -46,6 +50,117 @@ void Copy(const std::vector<std::string>& input, OutputContainer& output)
         auto err = output.PushBack(item.c_str());
         AOS_ERROR_CHECK_AND_THROW(err, "can't copy container item");
     }
+}
+
+/**
+ * CAN link settings that must survive the move into the instance namespace.
+ */
+struct CANLinkParams {
+    bool     mIsCAN {};
+    uint64_t mBitrate {};
+    uint64_t mRestartMS {};
+};
+
+/**
+ * Reads the CAN bit timing of a host interface, if it is a CAN link.
+ *
+ * Returns an empty (mIsCAN == false) value for anything that is not CAN, and for any
+ * failure: this is a best effort step and must never stop the network setup.
+ */
+CANLinkParams ReadCANLinkParams(const ExecItf& exec, const std::string& device)
+{
+    CANLinkParams params;
+
+    auto [out, err] = exec.ExecCommand(cIPCommand, {"-json", "-details", "link", "show", device});
+    if (!err.IsNone()) {
+        LOG_WRN() << "Can't read link settings: device=" << device.c_str() << ", err=" << err;
+
+        return params;
+    }
+
+    try {
+        auto [var, parseErr] = common::utils::ParseJson(out);
+        AOS_ERROR_CHECK_AND_THROW(parseErr, "can't parse link settings");
+
+        auto array = var.extract<Poco::JSON::Array::Ptr>();
+        if (array.isNull() || array->size() == 0) {
+            return params;
+        }
+
+        common::utils::CaseInsensitiveObjectWrapper link(array->getObject(0));
+        if (!link.Has("linkinfo")) {
+            return params;
+        }
+
+        auto linkInfo = link.GetObject("linkinfo");
+        if (linkInfo.GetOptionalValue<std::string>("info_kind").value_or("") != "can") {
+            return params;
+        }
+
+        auto infoData = linkInfo.GetObject("info_data");
+
+        params.mRestartMS = infoData.GetOptionalValue<uint64_t>("restart_ms").value_or(0);
+
+        if (infoData.Has("bittiming")) {
+            params.mBitrate = infoData.GetObject("bittiming").GetOptionalValue<uint64_t>("bitrate").value_or(0);
+        }
+
+        params.mIsCAN = params.mBitrate != 0;
+    } catch (const std::exception& e) {
+        LOG_WRN() << "Can't read CAN link settings: device=" << device.c_str() << ", err=" << e.what();
+    }
+
+    return params;
+}
+
+/**
+ * Re-applies the CAN bit timing inside the instance namespace and brings the link up.
+ *
+ * gs_usb only sends the bit timing to the adapter on changelink -- that is, when
+ * "type can bitrate N" is given. Moving the interface into another namespace makes the
+ * kernel close it, which drops the setting on the adapter, and bringing it up again does
+ * not restore it. The kernel still remembers the value, so "ip -details link show" keeps
+ * reporting the right bitrate and nothing looks wrong, while the link neither receives nor
+ * completes a transmission.
+ *
+ * The host never hits this because can0-up.service brings the link up and sets the bitrate
+ * in one command. A CAN HAT never hits it either: the SPI driver writes the bit timing to
+ * the controller registers on every open. It is specific to USB adapters.
+ *
+ * Measured on 2026-09-02 with kernel 6.6.63 and two different gs_usb adapters. Details and
+ * the reproduction are in edge-device-platform/CAN_PASSTHROUGH_DESIGN.md section 6-4.
+ */
+void RestoreCANLink(
+    const ExecItf& exec, const std::string& netNS, const std::string& device, const CANLinkParams& params)
+{
+    // "ip -netns" resolves the name under /var/run/netns, where the runtime puts the
+    // namespace. CNI_NETNS carries the full path, so take the last component.
+    const auto name = std::filesystem::path(netNS).filename().string();
+    if (name.empty()) {
+        LOG_WRN() << "Can't restore CAN link: empty network namespace";
+
+        return;
+    }
+
+    const std::vector<std::vector<std::string>> steps = {
+        {"-netns", name, "link", "set", device, "down"},
+        {"-netns", name, "link", "set", device, "type", "can", "bitrate", std::to_string(params.mBitrate),
+            "restart-ms", std::to_string(params.mRestartMS)},
+        {"-netns", name, "link", "set", device, "up"},
+    };
+
+    for (const auto& args : steps) {
+        if (auto [out, err] = exec.ExecCommand(cIPCommand, args); !err.IsNone()) {
+            // Do not throw. The interface has already been moved, and aborting the ADD
+            // here would leave the rest of the chain behind (see AddNetworkList).
+            LOG_ERR() << "Can't restore CAN link: device=" << device.c_str() << ", err=" << err;
+
+            return;
+        }
+    }
+
+    LOG_DBG() << "Restored CAN link: device=" << device.c_str() << ", bitrate=" << params.mBitrate
+              << ", restartMS=" << params.mRestartMS;
 }
 
 Interface InterfaceFromJson(const aos::common::utils::CaseInsensitiveObjectWrapper& object)
@@ -619,8 +734,20 @@ std::string CNI::ExecuteHostDevicePlugin(const NetworkConfigList& net, const Run
     auto hostDeviceConfig = HostDeviceConfigToJSON(net, prevResult, plugins);
     auto pluginPath       = std::filesystem::path(cBinaryPluginDir) / net.mHostDevice.mType.CStr();
 
+    // Read the CAN bit timing before the move: it is lost on the way in, and the host is
+    // the only place it can still be read from. See RestoreCANLink().
+    CANLinkParams canParams;
+
+    if (action == ActionEnum::eAdd) {
+        canParams = ReadCANLinkParams(*mExec, net.mHostDevice.mDevice.CStr());
+    }
+
     auto [result, err] = mExec->ExecPlugin(hostDeviceConfig, pluginPath, args);
     AOS_ERROR_CHECK_AND_THROW(err, "failed to execute host device plugin");
+
+    if (action == ActionEnum::eAdd && canParams.mIsCAN) {
+        RestoreCANLink(*mExec, rt.mNetNS.CStr(), net.mHostDevice.mDevice.CStr(), canParams);
+    }
 
     return result;
 }

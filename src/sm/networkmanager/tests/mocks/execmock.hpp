@@ -17,6 +17,8 @@ class MockExec : public ExecItf {
 public:
     MOCK_METHOD(RetWithError<std::string>, ExecPlugin,
         (const std::string& payload, const std::string& pluginPath, const std::string& args), (const, override));
+    MOCK_METHOD(RetWithError<std::string>, ExecCommand, (const std::string& path, (const std::vector<std::string>&)args),
+        (const, override));
 };
 
 } // namespace aos::sm::cni
