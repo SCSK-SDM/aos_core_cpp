@@ -214,6 +214,29 @@ Error InterfaceManager::GetLink(const String& ifname, sm::networkmanager::LinkIn
     return ErrorEnum::eNone;
 }
 
+Error InterfaceManager::GetUplinkInterface(String& ifname) const
+{
+    LOG_DBG() << "Get uplink interface";
+
+    auto [index, err] = GetMasterInterfaceIndex();
+    if (!err.IsNone()) {
+        return err;
+    }
+
+    char name[IF_NAMESIZE] = {};
+
+    if (if_indextoname(static_cast<unsigned int>(index), name) == nullptr) {
+        return AOS_ERROR_WRAP(Error(ErrorEnum::eNotFound,
+            ("failed to resolve name of default route interface: " + std::string(strerror(errno))).c_str()));
+    }
+
+    if (auto errAssign = ifname.Assign(name); !errAssign.IsNone()) {
+        return AOS_ERROR_WRAP(errAssign);
+    }
+
+    return ErrorEnum::eNone;
+}
+
 Error InterfaceManager::DeleteLink(const String& ifname)
 {
     LOG_DBG() << "Remove interface: ifname=" << ifname;

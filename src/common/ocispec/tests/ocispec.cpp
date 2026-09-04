@@ -277,6 +277,33 @@ Poco::JSON::Object::Ptr ToJSON(const aos::RunParameters& params)
  * Suite
  **********************************************************************************************************************/
 
+std::string MakeImageConfigWithPorts(const std::string& ports)
+{
+    return R"(
+{
+    "architecture": "x86_64",
+    "author": "gtest",
+    "created": "2024-12-31T23:59:59Z",
+    "os": "Linux",
+    "osVersion": "6.0.8",
+    "variant": "6",
+    "config": {
+        "exposedPorts": {
+)" + ports
+        + R"(
+        },
+        "workingDir": "/test-working-dir"
+    },
+    "rootfs": {
+        "type": "layers",
+        "diff_ids": [
+            "sha256:129abeb509f55870ec19f24eba0caecccee3f0e055c467e1df8513bdcddc746f"
+        ]
+    }
+}
+)";
+}
+
 class OCISpecTest : public Test {
 public:
     void SetUp() override
@@ -340,6 +367,67 @@ TEST_F(OCISpecTest, LoadAndSaveImageConfig)
     ASSERT_TRUE(mOCISpec.LoadImageConfig(cSavePath, *rhsImageConfig).IsNone());
 
     ASSERT_EQ(*lhsImageConfig, *rhsImageConfig);
+}
+
+TEST_F(OCISpecTest, LoadImageConfigWithRTPSPortRange)
+{
+    const auto cPath = fs::JoinPath(cTestBaseDir, "image-config-rtps.json");
+
+    std::string ports;
+
+    for (uint16_t port = 7410; port <= 7450; ++port) {
+        ports += (ports.empty() ? "" : ",\n") + std::string("            \"") + std::to_string(port) + "/udp\": {}";
+    }
+
+    fs::WriteStringToFile(cPath, MakeImageConfigWithPorts(ports).c_str(), S_IRUSR | S_IWUSR);
+
+    auto imageConfig = std::make_unique<aos::oci::ImageConfig>();
+
+    auto err = mOCISpec.LoadImageConfig(cPath, *imageConfig);
+
+    ASSERT_TRUE(err.IsNone()) << "LoadImageConfig failed: " << tests::utils::ErrorToStr(err);
+
+    ASSERT_EQ(imageConfig->mConfig.mExposedPorts.Size(), 41U);
+    EXPECT_EQ(imageConfig->mConfig.mExposedPorts[0], "7410/udp");
+    EXPECT_EQ(imageConfig->mConfig.mExposedPorts[40], "7450/udp");
+}
+
+TEST_F(OCISpecTest, LoadImageConfigWithMaxExposedPorts)
+{
+    const auto cPath = fs::JoinPath(cTestBaseDir, "image-config-max-ports.json");
+
+    std::string ports;
+
+    for (size_t i = 0; i < aos::cMaxNumExposedPorts; ++i) {
+        ports += (ports.empty() ? "" : ",\n") + std::string("            \"") + std::to_string(7000 + i) + "/udp\": {}";
+    }
+
+    fs::WriteStringToFile(cPath, MakeImageConfigWithPorts(ports).c_str(), S_IRUSR | S_IWUSR);
+
+    auto imageConfig = std::make_unique<aos::oci::ImageConfig>();
+
+    auto err = mOCISpec.LoadImageConfig(cPath, *imageConfig);
+
+    ASSERT_TRUE(err.IsNone()) << "LoadImageConfig failed: " << tests::utils::ErrorToStr(err);
+
+    EXPECT_EQ(imageConfig->mConfig.mExposedPorts.Size(), aos::cMaxNumExposedPorts);
+}
+
+TEST_F(OCISpecTest, LoadImageConfigTooManyExposedPortsFails)
+{
+    const auto cPath = fs::JoinPath(cTestBaseDir, "image-config-too-many-ports.json");
+
+    std::string ports;
+
+    for (size_t i = 0; i < aos::cMaxNumExposedPorts + 1; ++i) {
+        ports += (ports.empty() ? "" : ",\n") + std::string("            \"") + std::to_string(7000 + i) + "/udp\": {}";
+    }
+
+    fs::WriteStringToFile(cPath, MakeImageConfigWithPorts(ports).c_str(), S_IRUSR | S_IWUSR);
+
+    auto imageConfig = std::make_unique<aos::oci::ImageConfig>();
+
+    EXPECT_FALSE(mOCISpec.LoadImageConfig(cPath, *imageConfig).IsNone());
 }
 
 TEST_F(OCISpecTest, LoadAndSaveRuntimeConfig)

@@ -161,6 +161,14 @@ public:
     Error GetLink(const String& ifname, sm::networkmanager::LinkInfo& info) const override;
 
     /**
+     * Returns the name of the interface the default route points to.
+     *
+     * @param[out] ifname uplink interface name.
+     * @return Error, eNotFound if there is no default route.
+     */
+    Error GetUplinkInterface(String& ifname) const override;
+
+    /**
      * Removes interface.
      *
      * @param ifname interface name.
