@@ -267,6 +267,12 @@ std::string SerializeNetworkConfig(const sm::networkmanager::InstanceNetworkConf
     }
     obj.set("publishedPorts", publishedPorts);
 
+    Poco::JSON::Array networkDevices;
+    for (const auto& device : config.mNetworkDevices) {
+        networkDevices.add(device.CStr());
+    }
+    obj.set("networkDevices", networkDevices);
+
     Poco::JSON::Array allowedConnections;
     for (const auto& conn : config.mAllowedConnections) {
         allowedConnections.add(conn.CStr());
@@ -335,6 +341,13 @@ void DeserializeNetworkConfig(const std::string& jsonStr, sm::networkmanager::In
             AOS_ERROR_CHECK_AND_THROW(port.mProtocol.Assign(portObj->optValue<std::string>("protocol", "tcp").c_str()));
 
             AOS_ERROR_CHECK_AND_THROW(config.mPublishedPorts.PushBack(port));
+        }
+    }
+
+    if (obj->has("networkDevices")) {
+        auto devices = obj->getArray("networkDevices");
+        for (const auto& device : *devices) {
+            AOS_ERROR_CHECK_AND_THROW(config.mNetworkDevices.PushBack(device.convert<std::string>().c_str()));
         }
     }
 

@@ -302,6 +302,16 @@ public:
     Error MoveLinkToNamespace(const String& ifname, const String& netNSPath) override;
 
     /**
+     * Hands a physical host interface to an instance: moves it into the netns,
+     * re-applies the CAN bit timing if the link is a CAN device and brings it up.
+     *
+     * @param ifname interface name.
+     * @param netNSPath path to the target netns (e.g. /run/netns/<id>).
+     * @return Error.
+     */
+    Error MoveHostInterfaceToNamespace(const String& ifname, const String& netNSPath) override;
+
+    /**
      * Renames a link (must be down). Runs inside netNSPath when non-empty.
      *
      * @param ifname current interface name.

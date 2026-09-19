@@ -23,6 +23,7 @@
 #include <netlink/route/addr.h>
 #include <netlink/route/link.h>
 #include <netlink/route/link/bridge.h>
+#include <netlink/route/link/can.h>
 #include <netlink/route/link/veth.h>
 #include <netlink/route/link/vlan.h>
 #include <netlink/route/nexthop.h>
@@ -844,6 +845,110 @@ Error InterfaceManager::MoveLinkToNamespace(const String& ifname, const String& 
     }
 
     return ErrorEnum::eNone;
+}
+
+Error InterfaceManager::MoveHostInterfaceToNamespace(const String& ifname, const String& netNSPath)
+{
+    LOG_DBG() << "Move host interface to namespace" << Log::Field("ifname", ifname)
+              << Log::Field("netNSPath", netNSPath);
+
+    // Read the CAN bit timing before the move. A USB CAN adapter (gs_usb) only
+    // receives the bit timing on changelink; moving the interface makes the
+    // kernel close it, which drops the setting on the adapter while the kernel
+    // still reports the old value. Re-applying it inside the namespace is the
+    // only way to get a working link. An SPI controller (CAN HAT) writes the
+    // timing on every open, so for it the re-apply is harmless.
+    uint32_t canBitrate = 0;
+
+    {
+        auto [sock, err] = CreateNetlinkSocket();
+        if (!err.IsNone()) {
+            return err;
+        }
+
+        nl_cache* cacheRaw;
+
+        if (auto errCache = rtnl_link_alloc_cache(sock.get(), AF_UNSPEC, &cacheRaw); errCache < 0) {
+            return NLToAosErr(errCache, "failed to allocate link cache");
+        }
+
+        [[maybe_unused]] auto cleanupCache = DeferRelease(cacheRaw, [](nl_cache* cache) { nl_cache_free(cache); });
+
+        auto link = DeferRelease(rtnl_link_get_by_name(cacheRaw, ifname.CStr()), rtnl_link_put);
+        if (!link) {
+            return AOS_ERROR_WRAP(Error(
+                ErrorEnum::eNotFound, ("requested host network device does not exist: " + std::string(ifname.CStr())).c_str()));
+        }
+
+        if (rtnl_link_is_can(link.Get())) {
+            if (rtnl_link_can_get_bitrate(link.Get(), &canBitrate) < 0) {
+                canBitrate = 0;
+            }
+
+            LOG_DBG() << "CAN interface bit timing" << Log::Field("ifname", ifname) << Log::Field("bitrate", canBitrate);
+        }
+    }
+
+    if (auto err = MoveLinkToNamespace(ifname, netNSPath); !err.IsNone()) {
+        return err;
+    }
+
+    auto doConfigure = [&]() -> Error {
+        auto [sock, err] = CreateNetlinkSocket();
+        if (!err.IsNone()) {
+            return err;
+        }
+
+        if (canBitrate > 0) {
+            nl_cache* cacheRaw;
+
+            if (auto errCache = rtnl_link_alloc_cache(sock.get(), AF_UNSPEC, &cacheRaw); errCache < 0) {
+                return NLToAosErr(errCache, "failed to allocate link cache");
+            }
+
+            [[maybe_unused]] auto cleanupCache
+                = DeferRelease(cacheRaw, [](nl_cache* cache) { nl_cache_free(cache); });
+
+            auto link = DeferRelease(rtnl_link_get_by_name(cacheRaw, ifname.CStr()), rtnl_link_put);
+            if (!link) {
+                return AOS_ERROR_WRAP(
+                    Error(ErrorEnum::eNotFound, ("interface not found in namespace: " + std::string(ifname.CStr())).c_str()));
+            }
+
+            auto change = DeferRelease(rtnl_link_alloc(), rtnl_link_put);
+            if (!change) {
+                return NLToAosErr(errno, "failed to allocate link change object");
+            }
+
+            rtnl_link_set_type(change.Get(), "can");
+
+            if (auto errBitrate = rtnl_link_can_set_bitrate(change.Get(), canBitrate); errBitrate < 0) {
+                return NLToAosErr(errBitrate, "failed to set CAN bitrate");
+            }
+
+            if (auto errChange = rtnl_link_change(sock.get(), link.Get(), change.Get(), 0); errChange < 0) {
+                return NLToAosErr(errChange, "failed to apply CAN bitrate");
+            }
+        }
+
+        auto [link, linkErr] = AllocLink();
+        if (!linkErr.IsNone()) {
+            return linkErr;
+        }
+
+        rtnl_link_set_name(link.get(), ifname.CStr());
+        rtnl_link_set_flags(link.get(), IFF_UP);
+
+        if (auto errUp = rtnl_link_change(sock.get(), link.get(), link.get(), 0); errUp < 0) {
+            return NLToAosErr(errUp, "failed to set link up");
+        }
+
+        return ErrorEnum::eNone;
+    };
+
+    // The interface is already inside the namespace: a failure here does not
+    // roll the move back (the namespace teardown returns it to the host).
+    return WithNetNS(std::string(netNSPath.CStr()), doConfigure);
 }
 
 Error InterfaceManager::RenameLink(const String& ifname, const String& newName, const String& netNSPath)
