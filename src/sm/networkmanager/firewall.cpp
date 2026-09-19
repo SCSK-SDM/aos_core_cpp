@@ -128,6 +128,21 @@ Error AppendInstanceRules(
         }
     }
 
+    // A published port is reachable from anywhere by definition: open the
+    // container port the DNAT rule points at, like an exposed port.
+    for (const auto& pub : params.mPublished) {
+        nftables::FWRule r {};
+
+        r.mDstAddr = instanceIP;
+        r.mProto   = pub.mProtocol.IsEmpty() ? "tcp" : pub.mProtocol.CStr();
+        r.mDstPort = pub.mContainerPort;
+        r.mAction  = nftables::FWActionEnum::eAccept;
+
+        if (auto err = txn.AddRule(table, chain, r); !err.IsNone()) {
+            return AOS_ERROR_WRAP(err);
+        }
+    }
+
     for (const auto& out : params.mOutput) {
         common::utils::PortRange range {};
         Error                    err;
@@ -202,7 +217,17 @@ Error Firewall::Init(nftables::FWBackendItf& backend)
 
 std::string Firewall::ChainName(const String& instanceID)
 {
-    std::string name {cInstanceChainPrefix};
+    return ChainName(cInstanceChainPrefix, instanceID);
+}
+
+bool Firewall::IsPublishedChain(const std::string& chain)
+{
+    return chain.rfind(cPublishedInPrefix, 0) == 0 || chain.rfind(cPublishedOutPrefix, 0) == 0;
+}
+
+std::string Firewall::ChainName(const char* prefix, const String& instanceID)
+{
+    std::string name {prefix};
 
     name.reserve(name.size() + instanceID.Size());
 
@@ -236,10 +261,17 @@ Error Firewall::Start()
         }
     }
 
+    // The OS-provisioned skeleton (aos.nft) has no prerouting chain: published
+    // ports need one, and "add chain" is idempotent for an existing base chain.
+    if (auto err = EnsurePreroutingChain(); !err.IsNone()) {
+        return AOS_ERROR_WRAP(err);
+    }
+
     {
         std::lock_guard lock {mBatchMutex};
 
         mInstanceJumps.clear();
+        mPublishedJumps.clear();
     }
 
     mMasqueradeRules.clear();
@@ -307,11 +339,24 @@ Error Firewall::RemoveOrphans(
         masqueradeHandles.push_back(r.mHandle);
     }
 
-    if (jumpHandles.empty() && orphanChains.empty() && masqueradeHandles.empty()) {
-        return ErrorEnum::eNone;
+    std::set<std::string> keepPublished;
+
+    for (const auto& instanceID : knownInstanceIDs) {
+        keepPublished.emplace(ChainName(cPublishedInPrefix, instanceID));
+        keepPublished.emplace(ChainName(cPublishedOutPrefix, instanceID));
     }
 
     auto txn = mBackend->NewTxn();
+
+    bool publishedChanged = false;
+
+    if (auto err = ReapPublishedChains(*txn, &keepPublished, publishedChanged); !err.IsNone()) {
+        return AOS_ERROR_WRAP(err);
+    }
+
+    if (jumpHandles.empty() && orphanChains.empty() && masqueradeHandles.empty() && !publishedChanged) {
+        return ErrorEnum::eNone;
+    }
 
     for (const auto handle : jumpHandles) {
         txn->DeleteRuleByHandle(mTable, cForwardChain, handle);
@@ -342,6 +387,7 @@ Error Firewall::Stop()
             std::lock_guard lock {mBatchMutex};
 
             mInstanceJumps.clear();
+            mPublishedJumps.clear();
         }
 
         mMasqueradeRules.clear();
@@ -357,6 +403,7 @@ Error Firewall::Stop()
         std::lock_guard lock {mBatchMutex};
 
         mInstanceJumps.clear();
+        mPublishedJumps.clear();
     }
 
     mMasqueradeRules.clear();
@@ -375,6 +422,9 @@ Error Firewall::CreateSkeleton()
 
     txn->AddBaseChain({mTable, cPostroutingChain, nftables::FWChainTypeEnum::eNAT, nftables::FWHookEnum::ePostrouting,
         cNATPriority, nftables::FWActionEnum::eAccept});
+
+    txn->AddBaseChain({mTable, cPreroutingChain, nftables::FWChainTypeEnum::eNAT, nftables::FWHookEnum::ePrerouting,
+        cDNATPriority, nftables::FWActionEnum::eAccept});
 
     // Connection tracking gates the per-instance access rules: drop garbage
     // early and let reply traffic of allowed flows back in, so the access
@@ -427,11 +477,17 @@ Error Firewall::ReconcileArtifacts(const std::vector<nftables::FWListedRule>& fo
         }
     }
 
-    if (jumpHandles.empty() && instanceChains.empty() && masqueradeHandles.empty()) {
-        return ErrorEnum::eNone;
+    auto txn = mBackend->NewTxn();
+
+    bool publishedChanged = false;
+
+    if (auto err = ReapPublishedChains(*txn, nullptr, publishedChanged); !err.IsNone()) {
+        return AOS_ERROR_WRAP(err);
     }
 
-    auto txn = mBackend->NewTxn();
+    if (jumpHandles.empty() && instanceChains.empty() && masqueradeHandles.empty() && !publishedChanged) {
+        return ErrorEnum::eNone;
+    }
 
     for (const auto handle : jumpHandles) {
         txn->DeleteRuleByHandle(mTable, cForwardChain, handle);
@@ -447,6 +503,216 @@ Error Firewall::ReconcileArtifacts(const std::vector<nftables::FWListedRule>& fo
     }
 
     return txn->Commit();
+}
+
+Error Firewall::EnsurePreroutingChain()
+{
+    auto txn = mBackend->NewTxn();
+
+    txn->AddBaseChain({mTable, cPreroutingChain, nftables::FWChainTypeEnum::eNAT, nftables::FWHookEnum::ePrerouting,
+        cDNATPriority, nftables::FWActionEnum::eAccept});
+
+    return txn->Commit();
+}
+
+Error Firewall::ListPublishedJumps(const std::string& baseChain, std::vector<nftables::FWListedRule>& jumps)
+{
+    std::vector<nftables::FWListedRule> rules;
+
+    // A missing base chain (older skeleton, or nothing published yet) simply
+    // means there are no jumps.
+    if (auto err = mBackend->ListChainRules(mTable, baseChain, rules); !err.IsNone()) {
+        return ErrorEnum::eNone;
+    }
+
+    for (auto& r : rules) {
+        if (r.mRule.mAction == nftables::FWActionEnum::eJump && IsPublishedChain(r.mRule.mJumpTarget)) {
+            jumps.push_back(std::move(r));
+        }
+    }
+
+    return ErrorEnum::eNone;
+}
+
+Error Firewall::ReapPublishedChains(nftables::FWTxnItf& txn, const std::set<std::string>* keepChains, bool& changed)
+{
+    changed = false;
+
+    for (const auto* baseChain : {cPreroutingChain, cPostroutingChain}) {
+        std::vector<nftables::FWListedRule> jumps;
+
+        if (auto err = ListPublishedJumps(baseChain, jumps); !err.IsNone()) {
+            return AOS_ERROR_WRAP(err);
+        }
+
+        for (const auto& r : jumps) {
+            if (keepChains != nullptr && keepChains->count(r.mRule.mJumpTarget) != 0) {
+                // Chain of a known instance left by a previous SM lifetime: adopt it.
+                std::lock_guard lock {mBatchMutex};
+
+                mPublishedJumps[r.mRule.mJumpTarget] = r.mHandle;
+
+                continue;
+            }
+
+            txn.DeleteRuleByHandle(mTable, baseChain, r.mHandle);
+            txn.FlushChain(mTable, r.mRule.mJumpTarget);
+            txn.DeleteChain(mTable, r.mRule.mJumpTarget);
+
+            changed = true;
+        }
+    }
+
+    return ErrorEnum::eNone;
+}
+
+Error Firewall::AppendPublishedChains(
+    nftables::FWTxnItf& txn, const String& instanceID, const InstanceFirewallParams& params)
+{
+    if (params.mPublished.IsEmpty()) {
+        return ErrorEnum::eNone;
+    }
+
+    const std::string instanceIP {params.mIP.CStr()};
+    const auto        chainIn  = ChainName(cPublishedInPrefix, instanceID);
+    const auto        chainOut = ChainName(cPublishedOutPrefix, instanceID);
+
+    txn.AddChain({mTable, chainIn});
+    txn.AddChain({mTable, chainOut});
+
+    for (const auto& pub : params.mPublished) {
+        if (pub.mHostPort == 0 || pub.mContainerPort == 0) {
+            return AOS_ERROR_WRAP(Error(ErrorEnum::eInvalidArgument, "published port requires host and container port"));
+        }
+
+        const std::string proto = pub.mProtocol.IsEmpty() ? "tcp" : pub.mProtocol.CStr();
+
+        if (proto != "tcp" && proto != "udp") {
+            return AOS_ERROR_WRAP(Error(ErrorEnum::eInvalidArgument, "unsupported protocol"));
+        }
+
+        // prerouting: host port -> instance port. Without a host IP the port is
+        // published on every local address; "fib daddr type local" keeps
+        // transit traffic (instances talking to the outside on that port) out.
+        nftables::FWRule dnat {};
+
+        if (!pub.mHostIP.IsEmpty()) {
+            dnat.mDstAddr = pub.mHostIP.CStr();
+        } else {
+            dnat.mDstLocal = true;
+        }
+
+        dnat.mProto    = proto;
+        dnat.mDstPort  = pub.mHostPort;
+        dnat.mAction   = nftables::FWActionEnum::eDNAT;
+        dnat.mDNATAddr = instanceIP;
+        dnat.mDNATPort = pub.mContainerPort;
+
+        if (auto err = txn.AddRule(mTable, chainIn, dnat); !err.IsNone()) {
+            return AOS_ERROR_WRAP(err);
+        }
+
+        // postrouting hairpin: a client on the same bridge reaching the
+        // published port gets DNATed back into its own subnet; without SNAT
+        // the reply would bypass the host and the connection would not match.
+        if (!params.mSubnet.IsEmpty()) {
+            nftables::FWRule hairpin {};
+
+            hairpin.mSrcAddr = params.mSubnet.CStr();
+            hairpin.mDstAddr = instanceIP;
+            hairpin.mProto   = proto;
+            hairpin.mDstPort = pub.mContainerPort;
+            hairpin.mAction  = nftables::FWActionEnum::eMasquerade;
+
+            if (auto err = txn.AddRule(mTable, chainOut, hairpin); !err.IsNone()) {
+                return AOS_ERROR_WRAP(err);
+            }
+        }
+    }
+
+    nftables::FWRule jumpIn {};
+    jumpIn.mAction     = nftables::FWActionEnum::eJump;
+    jumpIn.mJumpTarget = chainIn;
+
+    if (auto err = txn.AddRule(mTable, cPreroutingChain, jumpIn); !err.IsNone()) {
+        return AOS_ERROR_WRAP(err);
+    }
+
+    nftables::FWRule jumpOut {};
+    jumpOut.mAction     = nftables::FWActionEnum::eJump;
+    jumpOut.mJumpTarget = chainOut;
+
+    if (auto err = txn.AddRule(mTable, cPostroutingChain, jumpOut); !err.IsNone()) {
+        return AOS_ERROR_WRAP(err);
+    }
+
+    return ErrorEnum::eNone;
+}
+
+// Caller holds mBatchMutex.
+Error Firewall::DeletePublishedChains(nftables::FWTxnItf& txn, const String& instanceID)
+{
+    const std::pair<const char*, std::string> chains[] = {
+        {cPreroutingChain, ChainName(cPublishedInPrefix, instanceID)},
+        {cPostroutingChain, ChainName(cPublishedOutPrefix, instanceID)},
+    };
+
+    for (const auto& [baseChain, chain] : chains) {
+        std::vector<nftables::FWRuleHandle> handles;
+
+        if (auto it = mPublishedJumps.find(chain); it != mPublishedJumps.end()) {
+            handles.push_back(it->second);
+
+            mPublishedJumps.erase(it);
+        }
+
+        if (handles.empty()) {
+            std::vector<nftables::FWListedRule> jumps;
+
+            if (auto err = ListPublishedJumps(baseChain, jumps); !err.IsNone()) {
+                return AOS_ERROR_WRAP(err);
+            }
+
+            for (const auto& r : jumps) {
+                if (r.mRule.mJumpTarget == chain) {
+                    handles.push_back(r.mHandle);
+                }
+            }
+        }
+
+        if (handles.empty()) {
+            continue;
+        }
+
+        for (const auto handle : handles) {
+            txn.DeleteRuleByHandle(mTable, baseChain, handle);
+        }
+
+        txn.FlushChain(mTable, chain);
+        txn.DeleteChain(mTable, chain);
+    }
+
+    return ErrorEnum::eNone;
+}
+
+// Caller holds mBatchMutex.
+void Firewall::RecordJumps(const std::vector<nftables::FWListedRule>& added)
+{
+    std::unordered_map<std::string, std::vector<nftables::FWRuleHandle>> jumpsByChain;
+
+    for (const auto& r : added) {
+        if (r.mRule.mAction == nftables::FWActionEnum::eJump) {
+            jumpsByChain[r.mRule.mJumpTarget].push_back(r.mHandle);
+        }
+    }
+
+    for (const auto& [chain, hs] : jumpsByChain) {
+        if (IsPublishedChain(chain)) {
+            mPublishedJumps[chain] = hs.back();
+        } else if (hs.size() >= 2) {
+            mInstanceJumps[chain] = {hs[hs.size() - 2], hs[hs.size() - 1]};
+        }
+    }
 }
 
 Error Firewall::AddInstance(const String& instanceID, const InstanceFirewallParams& params)
@@ -469,7 +735,16 @@ Error Firewall::AddInstance(const String& instanceID, const InstanceFirewallPara
                 return AOS_ERROR_WRAP(err);
             }
 
+            if (auto err = AppendPublishedChains(*mBatchTxn, instanceID, params); !err.IsNone()) {
+                return AOS_ERROR_WRAP(err);
+            }
+
             mBatchChains.insert(chain);
+
+            if (!params.mPublished.IsEmpty()) {
+                mBatchChains.insert(ChainName(cPublishedInPrefix, instanceID));
+                mBatchChains.insert(ChainName(cPublishedOutPrefix, instanceID));
+            }
 
             return ErrorEnum::eNone;
         }
@@ -481,16 +756,20 @@ Error Firewall::AddInstance(const String& instanceID, const InstanceFirewallPara
         return AOS_ERROR_WRAP(err);
     }
 
-    std::vector<nftables::FWRuleHandle> handles;
-
-    if (auto err = txn->Commit(handles); !err.IsNone()) {
+    if (auto err = AppendPublishedChains(*txn, instanceID, params); !err.IsNone()) {
         return AOS_ERROR_WRAP(err);
     }
 
-    if (handles.size() >= 2) {
+    std::vector<nftables::FWListedRule> added;
+
+    if (auto err = txn->Commit(added); !err.IsNone()) {
+        return AOS_ERROR_WRAP(err);
+    }
+
+    {
         std::lock_guard lock {mBatchMutex};
 
-        mInstanceJumps[chain] = {handles[handles.size() - 2], handles[handles.size() - 1]};
+        RecordJumps(added);
     }
 
     return ErrorEnum::eNone;
@@ -568,24 +847,33 @@ Error Firewall::RemoveInstance(const String& instanceID)
             }
         }
 
-        if (jumpHandles.empty()) {
-            return ErrorEnum::eNone;
-        }
     }
 
     {
         std::lock_guard lock {mBatchMutex};
 
         if (mBatchMode && mBatchTxn) {
-            DeleteInstanceChain(*mBatchTxn, chain, jumpHandles);
+            if (!jumpHandles.empty()) {
+                DeleteInstanceChain(*mBatchTxn, chain, jumpHandles);
+            }
 
-            return ErrorEnum::eNone;
+            return DeletePublishedChains(*mBatchTxn, instanceID);
         }
     }
 
     auto txn = mBackend->NewTxn();
 
-    DeleteInstanceChain(*txn, chain, jumpHandles);
+    if (!jumpHandles.empty()) {
+        DeleteInstanceChain(*txn, chain, jumpHandles);
+    }
+
+    {
+        std::lock_guard lock {mBatchMutex};
+
+        if (auto err = DeletePublishedChains(*txn, instanceID); !err.IsNone()) {
+            return AOS_ERROR_WRAP(err);
+        }
+    }
 
     if (auto err = txn->Commit(); !err.IsNone()) {
         return AOS_ERROR_WRAP(err);
@@ -639,21 +927,11 @@ Error Firewall::FlushBatch()
         return AOS_ERROR_WRAP(err);
     }
 
-    std::unordered_map<std::string, std::vector<nftables::FWRuleHandle>> jumpsByChain;
-
     for (const auto& r : added) {
         mAppliedHandles.insert(r.mHandle);
-
-        if (r.mRule.mAction == nftables::FWActionEnum::eJump) {
-            jumpsByChain[r.mRule.mJumpTarget].push_back(r.mHandle);
-        }
     }
 
-    for (const auto& [chain, hs] : jumpsByChain) {
-        if (hs.size() >= 2) {
-            mInstanceJumps[chain] = {hs[hs.size() - 2], hs[hs.size() - 1]};
-        }
-    }
+    RecordJumps(added);
 
     return ErrorEnum::eNone;
 }
@@ -692,6 +970,7 @@ Error Firewall::Revert()
 
         for (const auto& chain : chains) {
             mInstanceJumps.erase(chain);
+            mPublishedJumps.erase(chain);
         }
     }
 
@@ -713,6 +992,20 @@ Error Firewall::Revert()
 
         if (batchJump || handles.count(r.mHandle) != 0) {
             txn->DeleteRuleByHandle(mTable, cForwardChain, r.mHandle);
+        }
+    }
+
+    for (const auto* baseChain : {cPreroutingChain, cPostroutingChain}) {
+        std::vector<nftables::FWListedRule> jumps;
+
+        if (auto err = ListPublishedJumps(baseChain, jumps); !err.IsNone()) {
+            return AOS_ERROR_WRAP(err);
+        }
+
+        for (const auto& r : jumps) {
+            if (chains.count(r.mRule.mJumpTarget) != 0 || handles.count(r.mHandle) != 0) {
+                txn->DeleteRuleByHandle(mTable, baseChain, r.mHandle);
+            }
         }
     }
 
@@ -778,16 +1071,30 @@ Error Firewall::UpdateInstance(const String& instanceID, const InstanceFirewallP
         return AOS_ERROR_WRAP(err);
     }
 
-    std::vector<nftables::FWRuleHandle> handles;
+    // Published chains are rebuilt from scratch: the set of ports or the
+    // instance IP may have changed.
+    {
+        std::lock_guard lock {mBatchMutex};
 
-    if (auto err = txn->Commit(handles); !err.IsNone()) {
+        if (auto err = DeletePublishedChains(*txn, instanceID); !err.IsNone()) {
+            return AOS_ERROR_WRAP(err);
+        }
+    }
+
+    if (auto err = AppendPublishedChains(*txn, instanceID, params); !err.IsNone()) {
         return AOS_ERROR_WRAP(err);
     }
 
-    if (handles.size() >= 2) {
+    std::vector<nftables::FWListedRule> added;
+
+    if (auto err = txn->Commit(added); !err.IsNone()) {
+        return AOS_ERROR_WRAP(err);
+    }
+
+    {
         std::lock_guard lock {mBatchMutex};
 
-        mInstanceJumps[chain] = {handles[handles.size() - 2], handles[handles.size() - 1]};
+        RecordJumps(added);
     }
 
     return ErrorEnum::eNone;

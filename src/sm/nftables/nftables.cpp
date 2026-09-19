@@ -75,7 +75,8 @@ bool HasUnsafeToken(const std::string& value)
 bool RuleHasUnsafeToken(const FWRule& rule)
 {
     return HasUnsafeToken(rule.mSrcAddr) || HasUnsafeToken(rule.mDstAddr) || HasUnsafeToken(rule.mProto)
-        || HasUnsafeToken(rule.mOIFName) || HasUnsafeToken(rule.mJumpTarget) || HasUnsafeToken(rule.mCtState);
+        || HasUnsafeToken(rule.mOIFName) || HasUnsafeToken(rule.mJumpTarget) || HasUnsafeToken(rule.mCtState)
+        || HasUnsafeToken(rule.mDNATAddr);
 }
 
 void AppendRuleExpr(std::ostringstream& buf, const FWRule& rule)
@@ -90,6 +91,10 @@ void AppendRuleExpr(std::ostringstream& buf, const FWRule& rule)
 
     if (!rule.mDstAddr.empty()) {
         buf << " ip daddr " << rule.mDstAddr;
+    }
+
+    if (rule.mDstLocal) {
+        buf << " fib daddr type local";
     }
 
     if (!rule.mProto.empty()) {
@@ -132,6 +137,11 @@ void AppendRuleExpr(std::ostringstream& buf, const FWRule& rule)
     case FWActionEnum::eReturn:
         buf << " return";
         break;
+
+    case FWActionEnum::eDNAT:
+        // inet family: the address family of the target must be spelled out.
+        buf << " dnat ip to " << rule.mDNATAddr << ":" << rule.mDNATPort;
+        break;
     }
 }
 
@@ -149,6 +159,8 @@ bool ParseRuleLine(const std::string& line, FWListedRule& out)
     static const std::regex acceptRe(R"(\baccept\b)");
     static const std::regex dropRe(R"(\bdrop\b)");
     static const std::regex returnRe(R"(\breturn\b)");
+    static const std::regex dnatRe(R"(\bdnat\s+ip\s+to\s+([0-9.]+):(\d+))");
+    static const std::regex fibLocalRe(R"(\bfib\s+daddr\s+type\s+local\b)");
     static const std::regex handleRe(R"(#\s+handle\s+(\d+))");
 
     std::smatch m;
@@ -181,6 +193,10 @@ bool ParseRuleLine(const std::string& line, FWListedRule& out)
         out.mRule.mOIFName = m[2];
     }
 
+    if (std::regex_search(line, m, fibLocalRe)) {
+        out.mRule.mDstLocal = true;
+    }
+
     if (std::regex_search(line, m, counterRe)) {
         out.mRule.mCounter = true;
         out.mPackets       = std::stoull(m[1]);
@@ -193,6 +209,11 @@ bool ParseRuleLine(const std::string& line, FWListedRule& out)
         out.mRule.mAction     = FWActionEnum::eJump;
         out.mRule.mJumpTarget = m[1];
         actionFound           = true;
+    } else if (std::regex_search(line, m, dnatRe)) {
+        out.mRule.mAction   = FWActionEnum::eDNAT;
+        out.mRule.mDNATAddr = m[1];
+        out.mRule.mDNATPort = static_cast<uint16_t>(std::stoul(m[2]));
+        actionFound         = true;
     } else if (std::regex_search(line, m, masqueradeRe)) {
         out.mRule.mAction = FWActionEnum::eMasquerade;
         actionFound       = true;

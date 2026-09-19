@@ -51,11 +51,12 @@ public:
         ePostrouting,
         eInput,
         eOutput,
+        ePrerouting,
     };
 
     static const Array<const char* const> GetStrings()
     {
-        static const char* const sStrings[] = {"forward", "postrouting", "input", "output"};
+        static const char* const sStrings[] = {"forward", "postrouting", "input", "output", "prerouting"};
 
         return Array<const char* const>(sStrings, ArraySize(sStrings));
     };
@@ -75,11 +76,12 @@ public:
         eJump,
         eMasquerade,
         eReturn,
+        eDNAT,
     };
 
     static const Array<const char* const> GetStrings()
     {
-        static const char* const sStrings[] = {"accept", "drop", "jump", "masquerade", "return"};
+        static const char* const sStrings[] = {"accept", "drop", "jump", "masquerade", "return", "dnat"};
 
         return Array<const char* const>(sStrings, ArraySize(sStrings));
     };
@@ -134,6 +136,13 @@ struct FWRule {
     bool        mCounter {};
     std::string mCtState {};
     bool        mOIFNeg {};
+    // Match packets addressed to one of the host's own addresses
+    // ("fib daddr type local"). Used to publish a port on every local address
+    // without catching traffic that merely transits the host.
+    bool mDstLocal {};
+    // DNAT target (action eDNAT): "dnat ip to <addr>:<port>".
+    std::string mDNATAddr;
+    uint16_t    mDNATPort {};
 };
 
 /**

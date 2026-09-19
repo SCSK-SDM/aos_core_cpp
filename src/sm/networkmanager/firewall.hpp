@@ -138,17 +138,33 @@ private:
     static constexpr auto cTableName           = "aos";
     static constexpr auto cForwardChain        = "forward";
     static constexpr auto cPostroutingChain    = "postrouting";
+    static constexpr auto cPreroutingChain     = "prerouting";
     static constexpr auto cForwardPriority     = 0;
     static constexpr auto cNATPriority         = 100;
+    static constexpr auto cDNATPriority        = -100;
     static constexpr auto cInstanceChainPrefix = "instance_";
+    // Published ports (host port -> instance port). Two chains per instance:
+    // the DNAT rules (jumped from prerouting) and the hairpin masquerade rules
+    // (jumped from postrouting). They are separate because nftables only
+    // allows dnat in chains reached from a prerouting/output hook.
+    static constexpr auto cPublishedInPrefix  = "pub_in_";
+    static constexpr auto cPublishedOutPrefix = "pub_out_";
 
     static std::string ChainName(const String& instanceID);
+    static std::string ChainName(const char* prefix, const String& instanceID);
+    static bool        IsPublishedChain(const std::string& chain);
 
     Error CreateSkeleton();
+    Error EnsurePreroutingChain();
     Error ReconcileArtifacts(const std::vector<nftables::FWListedRule>& forwardRules);
     Error AppendInstanceChain(nftables::FWTxnItf& txn, const std::string& chain, const InstanceFirewallParams& params);
     void  DeleteInstanceChain(
          nftables::FWTxnItf& txn, const std::string& chain, const std::vector<nftables::FWRuleHandle>& jumpHandles);
+    Error AppendPublishedChains(nftables::FWTxnItf& txn, const String& instanceID, const InstanceFirewallParams& params);
+    Error DeletePublishedChains(nftables::FWTxnItf& txn, const String& instanceID);
+    Error ListPublishedJumps(const std::string& baseChain, std::vector<nftables::FWListedRule>& jumps);
+    Error ReapPublishedChains(nftables::FWTxnItf& txn, const std::set<std::string>* keepChains, bool& changed);
+    void  RecordJumps(const std::vector<nftables::FWListedRule>& added);
 
     const std::string                             mTable {cTableName};
     nftables::FWBackendItf*                       mBackend {};
@@ -161,6 +177,8 @@ private:
     std::set<nftables::FWRuleHandle>    mAppliedHandles;
 
     std::unordered_map<std::string, std::pair<nftables::FWRuleHandle, nftables::FWRuleHandle>> mInstanceJumps;
+    // Published chain name -> handle of its jump in the prerouting/postrouting base chain.
+    std::unordered_map<std::string, nftables::FWRuleHandle> mPublishedJumps;
 };
 
 } // namespace aos::sm::networkmanager

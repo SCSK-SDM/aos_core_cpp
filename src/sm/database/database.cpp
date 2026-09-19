@@ -256,6 +256,17 @@ std::string SerializeNetworkConfig(const sm::networkmanager::InstanceNetworkConf
     }
     obj.set("exposedPorts", exposedPorts);
 
+    Poco::JSON::Array publishedPorts;
+    for (const auto& port : config.mPublishedPorts) {
+        Poco::JSON::Object portObj;
+        portObj.set("hostIP", port.mHostIP.CStr());
+        portObj.set("hostPort", port.mHostPort);
+        portObj.set("containerPort", port.mContainerPort);
+        portObj.set("protocol", port.mProtocol.CStr());
+        publishedPorts.add(portObj);
+    }
+    obj.set("publishedPorts", publishedPorts);
+
     Poco::JSON::Array allowedConnections;
     for (const auto& conn : config.mAllowedConnections) {
         allowedConnections.add(conn.CStr());
@@ -308,6 +319,22 @@ void DeserializeNetworkConfig(const std::string& jsonStr, sm::networkmanager::In
         auto ports = obj->getArray("exposedPorts");
         for (const auto& port : *ports) {
             AOS_ERROR_CHECK_AND_THROW(config.mExposedPorts.PushBack(port.convert<std::string>().c_str()));
+        }
+    }
+
+    if (obj->has("publishedPorts")) {
+        auto ports = obj->getArray("publishedPorts");
+        for (size_t i = 0; i < ports->size(); ++i) {
+            auto portObj = ports->getObject(static_cast<unsigned>(i));
+
+            PublishedPort port;
+
+            AOS_ERROR_CHECK_AND_THROW(port.mHostIP.Assign(portObj->optValue<std::string>("hostIP", "").c_str()));
+            port.mHostPort      = static_cast<uint16_t>(portObj->getValue<unsigned>("hostPort"));
+            port.mContainerPort = static_cast<uint16_t>(portObj->getValue<unsigned>("containerPort"));
+            AOS_ERROR_CHECK_AND_THROW(port.mProtocol.Assign(portObj->optValue<std::string>("protocol", "tcp").c_str()));
+
+            AOS_ERROR_CHECK_AND_THROW(config.mPublishedPorts.PushBack(port));
         }
     }
 
