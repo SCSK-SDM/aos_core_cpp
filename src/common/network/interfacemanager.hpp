@@ -312,6 +312,15 @@ public:
     Error MoveHostInterfaceToNamespace(const String& ifname, const String& netNSPath) override;
 
     /**
+     * Returns a host interface from an instance netns to the host (init) netns.
+     *
+     * @param ifname interface name.
+     * @param netNSPath path to the netns the interface currently lives in.
+     * @return Error.
+     */
+    Error MoveInterfaceToHost(const String& ifname, const String& netNSPath) override;
+
+    /**
      * Renames a link (must be down). Runs inside netNSPath when non-empty.
      *
      * @param ifname current interface name.

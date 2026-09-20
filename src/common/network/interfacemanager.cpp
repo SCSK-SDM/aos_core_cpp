@@ -951,6 +951,50 @@ Error InterfaceManager::MoveHostInterfaceToNamespace(const String& ifname, const
     return WithNetNS(std::string(netNSPath.CStr()), doConfigure);
 }
 
+Error InterfaceManager::MoveInterfaceToHost(const String& ifname, const String& netNSPath)
+{
+    LOG_DBG() << "Move interface to host" << Log::Field("ifname", ifname) << Log::Field("netNSPath", netNSPath);
+
+    // The netlink socket has to be opened inside the instance netns: that is where
+    // the link is. The target is pid 1's netns, i.e. the host. The kernel closes the
+    // link on the way, so it comes back down; the next hand-over brings it up again.
+    auto doMove = [&]() -> Error {
+        auto [sock, err] = CreateNetlinkSocket();
+        if (!err.IsNone()) {
+            return err;
+        }
+
+        nl_cache* cacheRaw;
+
+        if (auto errCache = rtnl_link_alloc_cache(sock.get(), AF_UNSPEC, &cacheRaw); errCache < 0) {
+            return NLToAosErr(errCache, "failed to allocate link cache");
+        }
+
+        [[maybe_unused]] auto cleanupCache = DeferRelease(cacheRaw, [](nl_cache* cache) { nl_cache_free(cache); });
+
+        auto link = DeferRelease(rtnl_link_get_by_name(cacheRaw, ifname.CStr()), rtnl_link_put);
+        if (!link) {
+            // Already gone from the namespace (never moved, or returned by the kernel).
+            return ErrorEnum::eNone;
+        }
+
+        auto change = DeferRelease(rtnl_link_alloc(), rtnl_link_put);
+        if (!change) {
+            return NLToAosErr(errno, "failed to allocate link change object");
+        }
+
+        rtnl_link_set_ns_pid(change.Get(), 1);
+
+        if (auto errChange = rtnl_link_change(sock.get(), link.Get(), change.Get(), 0); errChange < 0) {
+            return NLToAosErr(errChange, "failed to move link to host");
+        }
+
+        return ErrorEnum::eNone;
+    };
+
+    return WithNetNS(std::string(netNSPath.CStr()), doMove);
+}
+
 Error InterfaceManager::RenameLink(const String& ifname, const String& newName, const String& netNSPath)
 {
     LOG_DBG() << "Rename link" << Log::Field("ifname", ifname) << Log::Field("newName", newName);
