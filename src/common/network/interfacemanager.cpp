@@ -750,12 +750,27 @@ Error InterfaceManager::CreateVethToNamespace(
     rtnl_link_set_name(peer, peerIfName.CStr());
     rtnl_link_set_ns_fd(peer, nsFd);
 
+    // The host veth of a previous life of the same instance may still exist: the
+    // instance netns is deleted lazily and the kernel reaps the pair only when the
+    // namespace is finally torn down. Creating a link with an existing name and
+    // NLM_F_CREATE (no NLM_F_EXCL) is treated by the kernel as a modify request,
+    // which veth does not support (changelink is not implemented):
+    //   failed to create veth pair into namespace: Operation not supported
+    // Delete the stale pair first; deleting the host side removes the peer too.
+    if (if_nametoindex(hostIfName.CStr()) != 0) {
+        LOG_WRN() << "Stale host veth exists, deleting before re-creation" << Log::Field("host", hostIfName);
+
+        if (auto errDel = DeleteLink(hostIfName); !errDel.IsNone()) {
+            return AOS_ERROR_WRAP(Error(errDel, "failed to delete stale host veth"));
+        }
+    }
+
     auto [sock, err] = CreateNetlinkSocket();
     if (!err.IsNone()) {
         return err;
     }
 
-    if (auto errAdd = rtnl_link_add(sock.get(), host.Get(), NLM_F_CREATE); errAdd < 0) {
+    if (auto errAdd = rtnl_link_add(sock.get(), host.Get(), NLM_F_CREATE | NLM_F_EXCL); errAdd < 0) {
         return NLToAosErr(errAdd, "failed to create veth pair into namespace");
     }
 
