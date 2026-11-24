@@ -192,6 +192,7 @@ private:
     static constexpr auto cOnlineCertificate       = "online";
     static constexpr auto cMaxServiceDiscoveryURLs = 1;
     static constexpr auto cSendTimeoutSec          = 30;
+    static constexpr auto cReceivePollIntervalSec  = 1;
 
     using SessionPtr                = std::unique_ptr<Poco::Net::HTTPClientSession>;
     using ResponseMessageVariant    = std::variant<BlobURLsInfo>;

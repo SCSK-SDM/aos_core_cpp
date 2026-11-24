@@ -790,6 +790,20 @@ Error Communication::ReceiveFrames()
         Poco::Buffer<char> buffer(0);
 
         do {
+            // Wait for incoming data before calling receiveFrame(). Since Poco 1.13.3 SecureSocketImpl holds one
+            // mutex for both receiveBytes() and sendBytes(), and keeps it while SSL_read() blocks. A blocking
+            // receiveFrame() therefore stalls every send until the next frame (cloud ping, every 20 s) arrives:
+            // each blob URL request took 20-40 s. poll() checks the socket fd without that mutex; available() covers
+            // data already buffered by WebSocketImpl or OpenSSL.
+            while (mWebSocket->available() == 0
+                && !mWebSocket->poll(Poco::Timespan(cReceivePollIntervalSec, 0), Poco::Net::Socket::SELECT_READ)) {
+                if (!mIsRunning) {
+                    LOG_DBG() << "Stop receiving web socket frames";
+
+                    return ErrorEnum::eNone;
+                }
+            }
+
             n = mWebSocket->receiveFrame(buffer, flags);
 
             const auto opcodes = flags & Poco::Net::WebSocket::FRAME_OP_BITMASK;
