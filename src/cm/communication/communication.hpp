@@ -193,6 +193,9 @@ private:
     static constexpr auto cMaxServiceDiscoveryURLs = 1;
     static constexpr auto cSendTimeoutSec          = 30;
     static constexpr auto cReceivePollIntervalSec  = 1;
+    // The cloud pings every 20 s. Without any frame for this long the connection is treated as dead and re-established
+    // (the receive timeout is infinite, so a half-open TCP connection otherwise goes unnoticed until TCP gives up).
+    static constexpr auto cNoFrameTimeoutSec       = 60;
 
     using SessionPtr                = std::unique_ptr<Poco::Net::HTTPClientSession>;
     using ResponseMessageVariant    = std::variant<BlobURLsInfo>;
@@ -225,6 +228,17 @@ private:
         void               ResetTimestamp(const Time& time) { mTimestamp = time; }
         bool               RetryAllowed() const { return mTries < cMaxTries; }
         void               IncrementTries() { ++mTries; }
+
+        // Messages enqueued before Start() (e.g. state requests of instances launched at boot) are created before the
+        // system ID is known. The cloud closes the connection on an empty system ID, and the message is resent every
+        // response timeout, so fill the ID in right before sending.
+        void SetSystemIDIfEmpty(const std::string& systemID)
+        {
+            auto header = mPayload ? mPayload->getObject("header") : nullptr;
+            if (header && header->optValue<std::string>("systemId", "").empty()) {
+                header->set("systemId", systemID);
+            }
+        }
 
     private:
         static constexpr auto cMaxTries = 3;

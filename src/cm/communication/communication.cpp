@@ -788,6 +788,7 @@ Error Communication::ReceiveFrames()
         int                flags {};
         int                n {};
         Poco::Buffer<char> buffer(0);
+        auto               lastFrameTime = std::chrono::steady_clock::now();
 
         do {
             // Wait for incoming data before calling receiveFrame(). Since Poco 1.13.3 SecureSocketImpl holds one
@@ -802,9 +803,14 @@ Error Communication::ReceiveFrames()
 
                     return ErrorEnum::eNone;
                 }
+
+                if (std::chrono::steady_clock::now() - lastFrameTime > std::chrono::seconds(cNoFrameTimeoutSec)) {
+                    return AOS_ERROR_WRAP(Error(ErrorEnum::eTimeout, "no frame received from cloud"));
+                }
             }
 
-            n = mWebSocket->receiveFrame(buffer, flags);
+            n             = mWebSocket->receiveFrame(buffer, flags);
+            lastFrameTime = std::chrono::steady_clock::now();
 
             const auto opcodes = flags & Poco::Net::WebSocket::FRAME_OP_BITMASK;
 
@@ -908,6 +914,8 @@ void Communication::HandleSendQueue()
         }
 
         try {
+            it->SetSystemIDIfEmpty(mSystemInfo.mSystemID.CStr());
+
             const auto data = it->Payload();
 
             WriteToMessageLog("TX", data);
